@@ -3,7 +3,7 @@
 量化交易系统原型：数据层、选股层、实验与版本管理、前端联调。
 
 - 仓库：https://github.com/NamiPapa/Quant
-- 本机路径：`/Users/binyao/Documents/Quant`
+- 本机路径：`/Users/binyao/code/Quant`
 - 主分支：main
 - 测试命令：`/usr/bin/python3 -m unittest discover -s tests`（见 `project.conf`）
 - 编码方：Codex；评审方：Claude

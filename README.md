@@ -12,10 +12,10 @@
 ## 接入新项目
 
 ```bash
-~/Documents/review-loop/bin/review-init <项目名> /path/to/repo
+~/code/review-loop/bin/review-init <项目名> /path/to/repo
 # 填写 projects/<项目名>/project.conf（TEST_CMD）和 PROJECT.md；本仓库和项目仓库分别提交
-~/Documents/review-loop/bin/review-run <项目名> --force --dry-run   # 预览评审提示
-~/Documents/review-loop/bin/review-install <项目名>                 # 安装每小时定时任务
+~/code/review-loop/bin/review-run <项目名> --force --dry-run   # 预览评审提示
+~/code/review-loop/bin/review-install <项目名>                 # 安装每小时定时任务
 ```
 
 ## 命令

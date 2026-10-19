@@ -3,7 +3,7 @@
 本项目的评审意见与改善记录不放在本仓库，而是集中存放在 agents_review 评审仓库：
 
 - GitHub：https://github.com/NamiPapa/agents_review
-- 本机路径：`~/Documents/review-loop`
+- 本机路径：`~/code/review-loop`
 - 本项目目录：`projects/{{PROJECT}}/`
 - 完整规则：评审仓库的 `AGENTS.md`（「编码方工作流程」）
 

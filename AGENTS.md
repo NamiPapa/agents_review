@@ -91,7 +91,7 @@ projects/
 ## 接入新项目
 
 ```bash
-~/Documents/review-loop/bin/review-init <项目名> <项目仓库路径>
+~/code/review-loop/bin/review-init <项目名> <项目仓库路径>
 ```
 
 它会创建 `projects/<项目名>/`（`project.conf`、`PROJECT.md`、`STATUS.md`、`TRACKER.md`、`reviews/`、`responses/`），并在项目仓库的 `AGENTS.md` 末尾追加「评审协作（agents_review）」一节，告诉该项目的编码方如何使用本仓库。已存在的文件不会覆盖。之后：
