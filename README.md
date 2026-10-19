@@ -68,4 +68,9 @@
 | `/review_on [项目]` / `/review_off [项目]` | 打开/关闭定时评审（关闭后重启也保持关闭） |
 | `/review_now [项目]` | 后台运行 `review-run <项目> --force`，结束后推送结果 |
 
-项目名省略时默认 `quant`。超过 1 小时的积压指令不执行。安装：`bin/review-bot-install`（卸载加 `--uninstall`），日志在 `~/Library/Logs/review-loop/bot/`。
+| `/claude [项目] 任务` / `/codex [项目] 任务` | 远程自由任务，见下 |
+| `/task` / `/cancel` | 查看/终止正在运行的远程任务 |
+
+项目名省略时默认 `quant`。超过 1 小时的积压指令不执行。
+
+远程自由任务由 `bin/review-task` 执行：基于项目仓库当前 HEAD 新建分支 `tg/<agent>-<时间>` 和独立 worktree，运行 agent（最长 90 分钟），然后由脚本统一提交改动、运行 `TEST_CMD`，推送“分支、测试结果、改动统计、agent 总结”到 Telegram 并删除 worktree；无改动则不留分支。一次只跑一个任务，不推送、不合并。权限：Claude 只允许读、写 worktree 内文件、运行测试命令和只读 git；Codex 使用 `workspace-write` 沙箱。日志在 `~/Library/Logs/review-loop/tasks/`。安装：`bin/review-bot-install`（卸载加 `--uninstall`），日志在 `~/Library/Logs/review-loop/bot/`。

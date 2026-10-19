@@ -7,6 +7,7 @@
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -29,7 +30,15 @@ HELP = """可用命令（项目名可省略，默认 quant）：
 /review_on [项目] 打开定时评审
 /review_off [项目] 关闭定时评审（重启后仍保持关闭）
 /review_now [项目] 立即强制评审一轮，完成后推送结果
-/help 显示本说明"""
+/claude [项目] 任务描述  让 Claude 在独立 worktree 执行任务，结果提交到新分支 tg/claude-*
+/codex [项目] 任务描述  同上，用 Codex，分支 tg/codex-*
+/task 查看正在运行的远程任务
+/cancel 终止正在运行的远程任务
+/help 显示本说明
+
+远程任务一次只跑一个，最长 90 分钟；不推送、不合并，分支留给你在电脑上确认。"""
+TASK_DIR = Path.home() / "Library/Logs/review-loop/tasks"
+TASK_LOCK = TASK_DIR / "running.json"
 
 
 def log(message):
@@ -158,7 +167,63 @@ def cmd_review_now(project):
     return f"▶️ 已开始 {project} 强制评审，可能需要十几分钟，结束后推送结果"
 
 
+def running_task():
+    """返回正在运行的任务信息；进程已不在则清掉残留锁。"""
+    if not TASK_LOCK.exists():
+        return None
+    state = json.loads(TASK_LOCK.read_text())
+    try:
+        os.kill(state["pid"], 0)
+    except (OSError, KeyError):
+        TASK_LOCK.unlink(missing_ok=True)
+        return None
+    return state
+
+
+def cmd_agent_task(agent, project, task):
+    project_paths(project)
+    if not task:
+        return f"用法: /{agent} [项目] 任务描述"
+    current = running_task()
+    if current:
+        return f"⏳ 已有任务在运行（/{current['agent']}，{current['started']} 开始）：{current['task'][:100]}\n可用 /cancel 终止"
+    TASK_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    task_file = TASK_DIR / f"{stamp}-{agent}.task.txt"
+    task_file.write_text(task)
+    proc = subprocess.Popen(["/usr/bin/python3", str(HUB / "bin/review-task"), agent, project, str(task_file)],
+                            start_new_session=True, stdout=subprocess.DEVNULL,
+                            stderr=open(TASK_DIR / f"{stamp}-{agent}.err.log", "w"))
+    TASK_LOCK.write_text(json.dumps({"pid": proc.pid, "agent": agent, "project": project, "task": task,
+                                     "started": time.strftime("%m-%d %H:%M")}, ensure_ascii=False))
+    return f"📥 已接收 /{agent} [{project}]，在独立 worktree 中执行，完成后推送分支、测试结果和改动摘要。"
+
+
+def cmd_task(_project):
+    current = running_task()
+    if not current:
+        return "当前没有运行中的远程任务"
+    return f"⏳ /{current['agent']} [{current['project']}] {current['started']} 开始\n{current['task'][:300]}"
+
+
+def cmd_cancel(_project):
+    current = running_task()
+    if not current:
+        return "当前没有运行中的远程任务"
+    # 只结束 agent 进程组；review-task 随后照常提交已有改动、跑测试并回报。
+    pgid = current.get("agent_pgid")
+    if not pgid:
+        return "任务还在准备 worktree，稍后再试"
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError as exc:
+        return f"❌ 终止失败: {exc}"
+    return "🛑 已终止 agent，稍后会收到已有改动和测试结果"
+
+
 COMMANDS = {
+    "/task": cmd_task,
+    "/cancel": cmd_cancel,
     "/status": cmd_status,
     "/p0": cmd_p0,
     "/review_on": cmd_review_on,
@@ -184,6 +249,20 @@ def handle(message):
     if command in ("/help", "/start"):
         send(HELP)
         return
+    if command in ("/claude", "/codex"):
+        rest = text.split(None, 1)[1].strip() if len(parts) > 1 else ""
+        first = rest.split(None, 1)
+        # 第一个词是已有项目名且后面还有内容时，视为指定项目。
+        if len(first) == 2 and (HUB / "projects" / first[0] / "project.conf").exists():
+            project, rest = first[0], first[1].strip()
+        else:
+            project = DEFAULT_PROJECT
+        try:
+            send(cmd_agent_task(command[1:], project, rest))
+        except Exception as exc:
+            log(f"指令失败 {text!r}: {exc!r}")
+            send(f"❌ {exc}")
+        return
     handler = COMMANDS.get(command)
     if not handler:
         send("不认识的指令。\n" + HELP)
@@ -202,7 +281,9 @@ def main():
     api("setMyCommands", commands=json.dumps([
         {"command": c.lstrip("/"), "description": d}
         for c, d in [("/status", "评审状态"), ("/p0", "open 的 P0"), ("/review_on", "打开定时评审"),
-                     ("/review_off", "关闭定时评审"), ("/review_now", "立即强制评审"), ("/help", "帮助")]
+                     ("/review_off", "关闭定时评审"), ("/review_now", "立即强制评审"), ("/claude", "Claude 远程任务"),
+                     ("/codex", "Codex 远程任务"), ("/task", "运行中的任务"), ("/cancel", "终止任务"),
+                     ("/help", "帮助")]
     ]))
     log("bot 已启动")
     while True:

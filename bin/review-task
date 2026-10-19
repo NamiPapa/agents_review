@@ -1,0 +1,164 @@
+#!/usr/bin/python3
+"""在项目仓库的独立 worktree 中运行一次 Claude/Codex 自由任务，结果提交到新分支并通过 Telegram 回报。
+
+用法：review-task <claude|codex> <项目名> <任务文本文件>
+由 review-bot 在后台调用。全局同一时间只跑一个任务；不推送、不合并，分支留给用户在本机确认。
+"""
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HUB = Path(__file__).resolve().parent.parent
+STATE_DIR = Path.home() / "Library/Logs/review-loop/tasks"
+LOCK_FILE = STATE_DIR / "running.json"
+WORKTREE_ROOT = Path.home() / "Library/Caches/review-loop/worktrees"
+TASK_TIMEOUT = 90 * 60
+TEST_TIMEOUT = 15 * 60
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", str(Path.home() / ".local/bin/claude"))
+CODEX_BIN = os.environ.get("CODEX_BIN", str(Path.home() / ".local/bin/codex"))
+
+PROMPT = """这是用户通过 Telegram 远程下达的任务，你在项目仓库的独立 git worktree（分支 {branch}）中以非交互方式运行，用户此刻不在电脑前。
+
+任务：
+{task}
+
+规则：
+- 先阅读仓库的 AGENTS.md，遵守其中的项目约定；但本次不要更新 agents_review 评审仓库，由用户确认分支后再处理。
+- 只修改当前工作目录内的文件。不要 git commit、push、切换分支或改动 git 配置；调度脚本会在你结束后统一提交到 {branch}。
+- 不要修改 agent.md 等需要用户确认的设计基线；遇到需要用户决定的问题，停下来在最终回复中列出选项。
+- 改完后运行测试：{test_cmd}
+- 最终回复用中文，简短说明：做了什么、测试结果、未完成或需要用户决定的事项。用户会在手机上阅读。
+"""
+
+
+def notify(text):
+    subprocess.run([str(HUB / "bin/review-notify")], input=text, text=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def git(repo, *args, check=True):
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} 失败: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def load_conf(project):
+    values = {}
+    for line in (HUB / "projects" / project / "project.conf").read_text().splitlines():
+        match = re.match(r'^([A-Z_]+)="?(.*?)"?$', line.strip())
+        if match:
+            values[match.group(1)] = match.group(2)
+    return values
+
+
+def run_group(args, cwd, log_path, timeout):
+    """在独立进程组中运行，超时或被 /cancel 时整组结束。返回 (exit_code, timed_out)。"""
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(args, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        state = json.loads(LOCK_FILE.read_text()) if LOCK_FILE.exists() else {"pid": os.getpid()}
+        state["agent_pgid"] = proc.pid
+        LOCK_FILE.write_text(json.dumps(state, ensure_ascii=False))
+        try:
+            return proc.wait(timeout=timeout), False
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait()
+            return proc.returncode, True
+
+
+def tail(path, lines):
+    text = Path(path).read_text(errors="replace").strip() if Path(path).exists() else ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def main():
+    agent, project, task_file = sys.argv[1:4]
+    task = Path(task_file).read_text().strip()
+    conf = load_conf(project)
+    repo = Path(git(conf["REPO_PATH"], "rev-parse", "--show-toplevel"))
+    test_cmd = conf.get("TEST_CMD", "")
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    branch = f"tg/{agent}-{stamp}"
+    worktree = WORKTREE_ROOT / f"{project}-{agent}-{stamp}"
+    agent_log = STATE_DIR / f"{stamp}-{agent}.log"
+    base = git(repo, "rev-parse", "--short", "HEAD")
+    base_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    dirty = bool(git(repo, "status", "--porcelain"))
+
+    git(repo, "worktree", "add", "--quiet", "-b", branch, str(worktree), "HEAD")
+    try:
+        prompt = PROMPT.format(branch=branch, task=task, test_cmd=test_cmd or "（未配置）")
+        last_message = STATE_DIR / f"{stamp}-{agent}.last.md"
+        if agent == "claude":
+            wt = str(worktree)
+            # 只开放 worktree 内读写和测试命令；-p 模式下未列出的工具一律拒绝。
+            args = [CLAUDE_BIN, "-p", prompt, "--allowedTools",
+                    "Read", "Grep", "Glob", f"Edit(/{wt}/**)", f"Write(/{wt}/**)",
+                    f"Bash({test_cmd}:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"]
+        else:
+            # workspace-write 沙箱：只能写 worktree，默认无网络。
+            args = [CODEX_BIN, "exec", "--sandbox", "workspace-write", "-C", str(worktree),
+                    "-o", str(last_message), prompt]
+        code, timed_out = run_group(args, worktree, agent_log, TASK_TIMEOUT)
+        if agent == "claude":
+            last_message.write_text(Path(agent_log).read_text(errors="replace"))
+
+        git(worktree, "add", "-A")
+        committed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"]).returncode != 0
+        if committed:
+            git(worktree, "commit", "--quiet", "-m",
+                f"tg/{agent}: {task.splitlines()[0][:60]}\n\n{task}\n\n由 Telegram 远程任务生成（{agent}）。")
+        stat = git(worktree, "diff", "--stat", f"{base}..HEAD") if committed else ""
+        commit = git(worktree, "rev-parse", "--short", "HEAD")
+
+        if test_cmd:
+            try:
+                test = subprocess.run(["bash", "-c", test_cmd], cwd=worktree, capture_output=True,
+                                      text=True, timeout=TEST_TIMEOUT)
+                out = (test.stdout + test.stderr).strip().splitlines()
+                ran = next((l for l in reversed(out) if l.startswith("Ran ")), "")
+                verdict = out[-1] if out else ""
+                tests = f"{'✅' if test.returncode == 0 else '❌'} {ran} {verdict}".strip()
+            except subprocess.TimeoutExpired:
+                tests = "❌ 测试超时"
+        else:
+            tests = "（未配置 TEST_CMD）"
+    finally:
+        git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+
+    if not committed:
+        git(repo, "branch", "-D", branch, check=False)
+    status = "⏱ 超时被终止" if timed_out else ("✅ 完成" if code == 0 else f"❌ 退出码 {code}")
+    summary = tail(last_message, 25)
+    lines = [
+        f"{status} /{agent} [{project}]",
+        f"任务: {task[:200]}",
+        f"分支: {branch} @ {commit}（基于 {base_branch}@{base}）" if committed else "无文件改动，未创建分支",
+        f"测试: {tests}",
+    ]
+    if dirty:
+        lines.append("注意：主工作区有未提交改动，任务基于最后一次提交，未包含这些改动")
+    if stat:
+        lines += ["", "改动:", "\n".join(stat.splitlines()[-12:])]
+    lines += ["", f"{agent} 总结:", summary or "（无输出）", "", f"日志: {agent_log}"]
+    notify("\n".join(lines))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        notify(f"❌ 远程任务异常: {exc}")
+        raise
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)
