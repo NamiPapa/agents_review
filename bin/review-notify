@@ -1,0 +1,54 @@
+#!/bin/bash
+# 通过 Telegram Bot 发送通知。凭据放在本机 ~/.config/review-loop/telegram.env，不进仓库：
+#   TELEGRAM_BOT_TOKEN=123456:ABC...
+#   TELEGRAM_CHAT_ID=123456789
+# 用法：
+#   review-notify "消息"        发送消息（不带参数时从标准输入读取）
+#   review-notify --find-chat   先给 bot 发一条消息，再用此命令查出 chat_id
+# 未配置凭据时静默退出 0，不影响评审流程。
+set -u
+
+ENV_FILE="${REVIEW_NOTIFY_ENV:-$HOME/.config/review-loop/telegram.env}"
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+[ -n "$TELEGRAM_BOT_TOKEN" ] || { echo "未配置 TELEGRAM_BOT_TOKEN（${ENV_FILE}），跳过通知" >&2; exit 0; }
+API="https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN"
+
+if [ "${1:-}" = "--find-chat" ]; then
+  curl -sS --max-time 20 "$API/getUpdates" | /usr/bin/python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if not data.get("ok"):
+    sys.exit("Telegram 返回错误: %s" % data.get("description"))
+chats = {}
+for update in data.get("result", []):
+    msg = update.get("message") or update.get("channel_post") or {}
+    chat = msg.get("chat")
+    if chat:
+        chats[chat["id"]] = chat.get("username") or chat.get("title") or chat.get("first_name") or ""
+if not chats:
+    sys.exit("没有找到会话：请先在 Telegram 里给 bot 发一条消息，再重试")
+for chat_id, name in chats.items():
+    print("TELEGRAM_CHAT_ID=%s  # %s" % (chat_id, name))
+'
+  exit $?
+fi
+
+[ -n "$TELEGRAM_CHAT_ID" ] || { echo "未配置 TELEGRAM_CHAT_ID（${ENV_FILE}），跳过通知" >&2; exit 0; }
+if [ $# -ge 1 ]; then
+  text="$*"
+else
+  text="$(cat)"
+fi
+# Telegram 单条消息上限 4096 字符。
+text="${text:0:4000}"
+
+response="$(curl -sS --max-time 20 "$API/sendMessage" \
+  --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+  --data-urlencode "text=$text" \
+  --data-urlencode "disable_web_page_preview=true")" || { echo "Telegram 请求失败" >&2; exit 1; }
+case "$response" in
+  *'"ok":true'*) exit 0 ;;
+  *) echo "Telegram 发送失败: $response" >&2; exit 1 ;;
+esac

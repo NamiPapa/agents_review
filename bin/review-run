@@ -36,6 +36,8 @@ LOG_DIR="$HOME/Library/Logs/review-loop/$PROJECT"
 LOCK_DIR="$LOG_DIR/review.lock"
 mkdir -p "$LOG_DIR"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_DIR/review.log"; }
+# Telegram 通知；未配置凭据时 review-notify 自行跳过，发送失败只记日志。
+notify() { "$HUB/bin/review-notify" "$1" >> "$LOG_DIR/review.log" 2>&1 || log "Telegram 通知失败"; }
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "上一轮评审仍在运行，跳过"
@@ -145,7 +147,12 @@ run_log="$LOG_DIR/review-$(date '+%Y%m%d-%H%M%S').log"
   --allowedTools "${ALLOWED_TOOLS[@]}") > "$run_log" 2>&1
 status=$?
 log "评审结束 exit=${status}，输出见 $run_log"
-[ "$status" -eq 0 ] || exit "$status"
+if [ "$status" -ne 0 ]; then
+  notify "❌ $PROJECT review-$review_number 失败（exit=$status）
+范围: $range
+日志: $run_log"
+  exit "$status"
+fi
 
 # 只提交评审方有权写入的文件。
 paths=("projects/$PROJECT/reviews" "projects/$PROJECT/TRACKER.md")
@@ -162,6 +169,26 @@ if [ "$PUSH" -eq 1 ] && has_remote; then
     log "已推送"
   else
     log "推送失败，请手动处理"
+    notify "⚠️ $PROJECT review-$review_number 已在本机提交，但推送失败，请手动处理"
     exit 1
   fi
 fi
+
+# 评审摘要：本轮新增的评审文件、TRACKER 中未关闭问题统计和 open 的 P0。
+branch="$(git -C "$HUB" rev-parse --abbrev-ref HEAD)"
+web="$(git -C "$HUB" remote get-url origin 2>/dev/null | sed -E 's#^git@github.com:#https://github.com/#; s#\.git$##')"
+files="$(git -C "$HUB" show --name-only --format= HEAD -- "projects/$PROJECT/reviews")"
+links=""
+for f in $files; do
+  if [ -n "$web" ]; then links+="$web/blob/$branch/$f"$'\n'; else links+="$f"$'\n'; fi
+done
+counts="$(awk -F'|' '$2 ~ /R[0-9]/ { st=$5; gsub(/ /,"",st); sev=$3; gsub(/ /,"",sev); if (st=="open") c[sev]++ } END { for (k in c) printf "%s=%d ", k, c[k] }' "$TRACKER_FILE")"
+needs_user="$(awk -F'|' '$2 ~ /R[0-9]/ && $0 ~ /needs-user/' "$TRACKER_FILE" | wc -l | tr -d ' ')"
+p0="$(awk -F'|' '$2 ~ /R[0-9]/ { st=$5; gsub(/ /,"",st); sev=$3; gsub(/ /,"",sev); if (sev=="P0" && st=="open") { id=$2; t=$4; gsub(/^ +| +$/,"",id); gsub(/^ +| +$/,"",t); print "• " id " " t } }' "$TRACKER_FILE")"
+notify "✅ $PROJECT review-$review_number 完成
+范围: $range
+未关闭: ${counts:-无} | 待你决策: $needs_user
+${p0:+open P0:
+$p0
+}
+${links}"

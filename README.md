@@ -42,4 +42,17 @@
 
 - Mac 休眠时不会运行，醒来后继续按间隔检查。
 - 需要 Claude Code CLI 已登录（`claude -p "OK"` 能返回），以及能推送本仓库的 git 凭据（当前用 SSH）。
-- 规划中：调度脚本轮流唤醒编码方和 Claude，并通过 Telegram 推送摘要和人工关卡。
+- 规划中：调度脚本轮流唤醒编码方和 Claude，并在 Telegram 中加入人工关卡。
+
+## Telegram 通知
+
+`review-run` 在评审完成（提交并推送后）、评审失败或推送失败时，通过 `bin/review-notify` 推送摘要：本轮编号、评审范围、未关闭问题按严重度统计、待用户决策数、open 的 P0 列表和评审文件的 GitHub 链接。
+
+配置（凭据只放本机，不进仓库）：
+
+1. 在 Telegram 找 @BotFather 创建 bot，拿到 token。
+2. 写入 `~/.config/review-loop/telegram.env`：`TELEGRAM_BOT_TOKEN=...`
+3. 在 Telegram 里给 bot 发任意一条消息，运行 `bin/review-notify --find-chat`，把输出的 `TELEGRAM_CHAT_ID=...` 追加到同一文件。
+4. `bin/review-notify "测试"` 验证。
+
+未配置时 `review-notify` 静默跳过，不影响评审。
