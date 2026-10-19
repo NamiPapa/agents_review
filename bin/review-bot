@@ -1,0 +1,224 @@
+#!/usr/bin/python3
+"""Telegram 遥控：用固定命令查看和控制定时评审，不执行任意命令或自由任务。
+
+凭据与 review-notify 共用 ~/.config/review-loop/telegram.env；只响应 TELEGRAM_CHAT_ID 发来的消息。
+由 launchd 常驻运行（见 bin/review-bot-install），长轮询 getUpdates，无需公网端口。
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HUB = Path(__file__).resolve().parent.parent
+ENV_FILE = Path(os.environ.get("REVIEW_NOTIFY_ENV", Path.home() / ".config/review-loop/telegram.env"))
+STATE_DIR = Path.home() / "Library/Logs/review-loop/bot"
+OFFSET_FILE = STATE_DIR / "offset"
+DEFAULT_PROJECT = "quant"
+# Mac 休眠期间积压的消息醒来后照常处理，但超过这个时长的指令视为过期，避免意外重放。
+MAX_MESSAGE_AGE = 3600
+UID = os.getuid()
+
+HELP = """可用命令（项目名可省略，默认 quant）：
+/status [项目] 定时评审开关、最近日志、STATUS 与问题统计
+/p0 [项目] 列出 open 的 P0
+/review_on [项目] 打开定时评审
+/review_off [项目] 关闭定时评审（重启后仍保持关闭）
+/review_now [项目] 立即强制评审一轮，完成后推送结果
+/help 显示本说明"""
+
+
+def log(message):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "bot.log", "a") as f:
+        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+
+
+def load_env():
+    env = {}
+    for line in ENV_FILE.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip("'\"")
+    return env["TELEGRAM_BOT_TOKEN"], env["TELEGRAM_CHAT_ID"]
+
+
+TOKEN, CHAT_ID = load_env()
+API = f"https://api.telegram.org/bot{TOKEN}"
+
+
+def api(method, http_timeout=40, **params):
+    data = urllib.parse.urlencode(params).encode()
+    with urllib.request.urlopen(f"{API}/{method}", data=data, timeout=http_timeout) as resp:
+        body = json.load(resp)
+    if not body.get("ok"):
+        raise RuntimeError(body.get("description"))
+    return body["result"]
+
+
+def send(text):
+    api("sendMessage", chat_id=CHAT_ID, text=text[:4000], disable_web_page_preview="true")
+
+
+def run(*args):
+    result = subprocess.run(args, capture_output=True, text=True)
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def project_paths(project):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", project):
+        raise ValueError(f"项目名不合法: {project}")
+    pdir = HUB / "projects" / project
+    if not (pdir / "project.conf").exists():
+        raise ValueError(f"未知项目: {project}")
+    label = "com.review-loop." + re.sub(r"[^A-Za-z0-9.-]", "-", project).rstrip("-")
+    return pdir, label, Path.home() / f"Library/LaunchAgents/{label}.plist"
+
+
+def field(path, name):
+    match = re.search(rf"^{name}:[ \t]*(.*)$", path.read_text(), re.M) if path.exists() else None
+    return match.group(1).strip() if match else ""
+
+
+def tracker_rows(pdir):
+    """问题清单表格行：(ID, 严重度, 问题, 状态)。"""
+    rows = []
+    for line in (pdir / "TRACKER.md").read_text().splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 4 and re.fullmatch(r"R\d+-P\d+-\d+", cells[0]):
+            rows.append(tuple(cells[:4]))
+    return rows
+
+
+def cmd_status(project):
+    pdir, label, plist = project_paths(project)
+    loaded = run("launchctl", "print", f"gui/{UID}/{label}")[0] == 0
+    review_log = Path.home() / f"Library/Logs/review-loop/{project}/review.log"
+    recent = review_log.read_text().splitlines()[-3:] if review_log.exists() else []
+    counts = {}
+    for _, sev, _, status in tracker_rows(pdir):
+        if status == "open":
+            counts[sev] = counts.get(sev, 0) + 1
+    needs_user = (pdir / "TRACKER.md").read_text().count("| needs-user |")
+    lines = [
+        f"📋 {project}",
+        f"定时评审: {'开' if loaded else '关'}{'' if plist.exists() else '（未安装）'}",
+        f"STATUS: ready_for_review={field(pdir / 'STATUS.md', 'ready_for_review') or '?'} "
+        f"head_commit={field(pdir / 'STATUS.md', 'head_commit') or '?'}",
+        f"TRACKER: last_reviewed={field(pdir / 'TRACKER.md', 'last_reviewed_commit') or '?'} "
+        f"next=review-{field(pdir / 'TRACKER.md', 'next_review_number') or '?'}",
+        "未关闭: " + (" ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "无") + f" | 待你决策: {needs_user}",
+        "最近日志:",
+        *(recent or ["（无）"]),
+    ]
+    return "\n".join(lines)
+
+
+def cmd_p0(project):
+    pdir, _, _ = project_paths(project)
+    items = [f"• {id_} {title}" for id_, sev, title, status in tracker_rows(pdir) if sev == "P0" and status == "open"]
+    return f"{project} open P0（{len(items)}）:\n" + ("\n".join(items) or "无")
+
+
+def cmd_review_on(project):
+    _, label, plist = project_paths(project)
+    run("launchctl", "enable", f"gui/{UID}/{label}")
+    if not plist.exists():
+        code, out = run("/bin/bash", str(HUB / "bin/review-install"), project)
+        return ("✅ " if code == 0 else "❌ ") + out
+    if run("launchctl", "print", f"gui/{UID}/{label}")[0] == 0:
+        return f"{project} 定时评审本来就是开的"
+    code, out = run("launchctl", "bootstrap", f"gui/{UID}", str(plist))
+    return f"✅ {project} 定时评审已打开（每小时检查 STATUS.md）" if code == 0 else f"❌ 打开失败: {out}"
+
+
+def cmd_review_off(project):
+    _, label, _ = project_paths(project)
+    run("launchctl", "bootout", f"gui/{UID}/{label}")
+    run("launchctl", "disable", f"gui/{UID}/{label}")
+    return f"⏸ {project} 定时评审已关闭（重启后仍保持关闭，/review_on 恢复）"
+
+
+def cmd_review_now(project):
+    project_paths(project)
+    review_log = Path.home() / f"Library/Logs/review-loop/{project}/review.log"
+    start = review_log.stat().st_size if review_log.exists() else 0
+    # 在后台运行；评审完成或失败时 review-run 自己推送摘要，这里只补充最终日志。
+    script = (
+        f"/bin/bash {HUB}/bin/review-run {project} --force; code=$?; "
+        f"tail -c +{start + 1} {review_log} | tail -5 | "
+        f"{{ printf '%s\\n' '🔚 {project} review_now 结束 exit='$code; cat; }} | {HUB}/bin/review-notify"
+    )
+    subprocess.Popen(["/bin/bash", "-c", script], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return f"▶️ 已开始 {project} 强制评审，可能需要十几分钟，结束后推送结果"
+
+
+COMMANDS = {
+    "/status": cmd_status,
+    "/p0": cmd_p0,
+    "/review_on": cmd_review_on,
+    "/review_off": cmd_review_off,
+    "/review_now": cmd_review_now,
+}
+
+
+def handle(message):
+    chat_id = str(message.get("chat", {}).get("id"))
+    text = (message.get("text") or "").strip()
+    if chat_id != CHAT_ID:
+        log(f"忽略未授权会话 {chat_id}: {text[:80]!r}")
+        return
+    if time.time() - message.get("date", 0) > MAX_MESSAGE_AGE:
+        log(f"忽略过期指令: {text!r}")
+        send(f"⌛ 指令已过期未执行: {text}")
+        return
+    parts = text.split()
+    command = parts[0].split("@")[0].lower() if parts else ""
+    project = parts[1] if len(parts) > 1 else DEFAULT_PROJECT
+    log(f"收到指令: {text!r}")
+    if command in ("/help", "/start"):
+        send(HELP)
+        return
+    handler = COMMANDS.get(command)
+    if not handler:
+        send("不认识的指令。\n" + HELP)
+        return
+    try:
+        reply = handler(project)
+    except Exception as exc:  # 回报给用户，bot 继续运行
+        log(f"指令失败 {text!r}: {exc!r}")
+        reply = f"❌ {exc}"
+    send(reply)
+
+
+def main():
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    offset = int(OFFSET_FILE.read_text()) if OFFSET_FILE.exists() else 0
+    api("setMyCommands", commands=json.dumps([
+        {"command": c.lstrip("/"), "description": d}
+        for c, d in [("/status", "评审状态"), ("/p0", "open 的 P0"), ("/review_on", "打开定时评审"),
+                     ("/review_off", "关闭定时评审"), ("/review_now", "立即强制评审"), ("/help", "帮助")]
+    ]))
+    log("bot 已启动")
+    while True:
+        try:
+            updates = api("getUpdates", http_timeout=40, offset=offset, timeout=30)
+        except Exception as exc:
+            log(f"getUpdates 失败: {exc!r}")
+            time.sleep(10)
+            continue
+        for update in updates:
+            # 先记录 offset 再处理，崩溃重启后不会重复执行同一指令。
+            offset = update["update_id"] + 1
+            OFFSET_FILE.write_text(str(offset))
+            if "message" in update:
+                handle(update["message"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

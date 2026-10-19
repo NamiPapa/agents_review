@@ -56,3 +56,16 @@
 4. `bin/review-notify "测试"` 验证。
 
 未配置时 `review-notify` 静默跳过，不影响评审。
+
+## Telegram 遥控（固定命令）
+
+`bin/review-bot` 常驻长轮询 Telegram，只响应 `TELEGRAM_CHAT_ID` 的消息，只提供固定命令，不执行任意命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/status [项目]` | 定时评审开关、STATUS/TRACKER 字段、未关闭问题统计、最近日志 |
+| `/p0 [项目]` | 列出 open 的 P0 |
+| `/review_on [项目]` / `/review_off [项目]` | 打开/关闭定时评审（关闭后重启也保持关闭） |
+| `/review_now [项目]` | 后台运行 `review-run <项目> --force`，结束后推送结果 |
+
+项目名省略时默认 `quant`。超过 1 小时的积压指令不执行。安装：`bin/review-bot-install`（卸载加 `--uninstall`），日志在 `~/Library/Logs/review-loop/bot/`。

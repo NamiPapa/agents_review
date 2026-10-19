@@ -1,0 +1,54 @@
+#!/bin/bash
+# 安装/卸载常驻的 Telegram 遥控 bot（launchd，开机登录后自动运行，退出后自动重启）。
+# 用法：review-bot-install [--uninstall]
+set -eu
+
+HUB="$(cd "$(dirname "$0")/.." && pwd)"
+LABEL="com.review-loop.bot"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG_DIR="$HOME/Library/Logs/review-loop/bot"
+DOMAIN="gui/$(id -u)"
+
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+if [ "${1:-}" = "--uninstall" ]; then
+  rm -f "$PLIST"
+  echo "已卸载 $LABEL"
+  exit 0
+fi
+
+[ -f "$HOME/.config/review-loop/telegram.env" ] || { echo "缺少 ~/.config/review-loop/telegram.env，见 README 的 Telegram 通知一节" >&2; exit 2; }
+mkdir -p "$LOG_DIR" "$(dirname "$PLIST")"
+cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>$HUB/bin/review-bot</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/launchd.err.log</string>
+</dict>
+</plist>
+PLIST_EOF
+plutil -lint "$PLIST" >/dev/null
+launchctl enable "$DOMAIN/$LABEL"
+launchctl bootstrap "$DOMAIN" "$PLIST"
+echo "已安装 ${LABEL}，日志在 $LOG_DIR"
