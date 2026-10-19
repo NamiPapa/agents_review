@@ -33,6 +33,7 @@ HELP = """可用命令（项目名可省略，默认 quant）：
 /claude [项目] 任务描述  让 Claude 在独立 worktree 执行任务，结果提交到新分支 tg/claude-*
 /codex [项目] 任务描述  同上，用 Codex，分支 tg/codex-*
 /task 查看正在运行的远程任务
+/tail 远程任务进度：agent 的阶段说明、最近命令和改动文件（无运行中任务时显示最近一次）
 /cancel 终止正在运行的远程任务
 /help 显示本说明
 
@@ -206,6 +207,81 @@ def cmd_task(_project):
     return f"⏳ /{current['agent']} [{current['project']}] {current['started']} 开始\n{current['task'][:300]}"
 
 
+CODEX_MARKERS = {"user", "codex", "exec", "thinking", "file update", "apply_patch", "tokens used"}
+
+
+def codex_events(log_text):
+    """从 codex exec 输出中提取 agent 的阶段说明和执行过的命令。"""
+    messages, commands = [], []
+    lines = log_text.splitlines()
+    for i, line in enumerate(lines):
+        if line == "codex":
+            block = []
+            for nxt in lines[i + 1:]:
+                if nxt in CODEX_MARKERS:
+                    break
+                block.append(nxt)
+            text = "\n".join(block).strip()
+            if text:
+                messages.append(text)
+        elif line == "exec" and i + 1 < len(lines):
+            cmd = re.sub(r" in /\S+$", "", lines[i + 1])
+            cmd = re.sub(r"^/bin/zsh -lc ", "", cmd).strip("\"'")
+            commands.append(cmd[:120])
+    return messages, commands
+
+
+def changed_files(repo, ref_or_worktree, base=None):
+    """返回改动统计：运行中看 worktree 未提交改动，结束后看分支相对基点的改动。"""
+    if base is None:
+        code, stat = run("git", "-C", str(ref_or_worktree), "diff", "--stat", "HEAD")
+        _, untracked = run("git", "-C", str(ref_or_worktree), "ls-files", "--others", "--exclude-standard")
+        extra = [f" {f} (新文件)" for f in untracked.splitlines() if f]
+        return "\n".join([*stat.splitlines()[-12:], *extra]) if code == 0 else ""
+    code, stat = run("git", "-C", str(repo), "diff", "--stat", f"{base}...{ref_or_worktree}")
+    return "\n".join(stat.splitlines()[-12:]) if code == 0 else ""
+
+
+def cmd_tail(_project):
+    current = running_task()
+    logs = sorted(TASK_DIR.glob("*-claude.log")) + sorted(TASK_DIR.glob("*-codex.log"))
+    if not logs:
+        return "还没有远程任务日志"
+    log_path = max(logs, key=lambda p: p.stat().st_mtime)
+    stamp, agent = log_path.stem.rsplit("-", 1)
+    task_files = sorted(TASK_DIR.glob(f"*-{agent}.task.txt"))
+    task = task_files[-1].read_text().strip() if task_files else ""
+    project = current["project"] if current else DEFAULT_PROJECT
+    pdir, _, _ = project_paths(project)
+    conf = dict(re.findall(r'^([A-Z_]+)="?(.*?)"?$', (pdir / "project.conf").read_text(), re.M))
+    repo = conf.get("REPO_PATH", "")
+    branch = f"tg/{agent}-{stamp}"
+    worktree = Path.home() / f"Library/Caches/review-loop/worktrees/{project}-{agent}-{stamp}"
+
+    started = time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
+    if current:
+        header = f"⏳ /{agent} 运行中，已 {int((time.time() - started) / 60)} 分钟"
+        changes = changed_files(repo, worktree) if worktree.exists() else ""
+    else:
+        has_branch = run("git", "-C", repo, "rev-parse", "--verify", "--quiet", branch)[0] == 0
+        header = f"✔️ 最近一次 /{agent}（{time.strftime('%m-%d %H:%M', time.localtime(started))}）已结束" + \
+            (f"，分支 {branch}" if has_branch else "，未留分支")
+        changes = changed_files(repo, branch, base=f"{branch}~1") if has_branch else ""
+
+    text = log_path.read_text(errors="replace")
+    lines = [header, f"任务: {task[:150]}"]
+    if agent == "codex":
+        messages, commands = codex_events(text)
+        lines += ["", "阶段说明（最近 3 条）:"]
+        lines += [f"• {m[:400]}" for m in messages[-3:]] or ["（暂无）"]
+        lines += ["", f"最近命令（共 {len(commands)} 条）:"]
+        lines += [f"$ {c}" for c in commands[-4:]] or ["（暂无）"]
+    else:
+        lines += ["", "Claude -p 运行中不输出过程，结束后显示总结:", text.strip()[-800:] or "（暂无）"]
+    lines += ["", "改动文件:", changes or "（暂无）"]
+    return "\n".join(lines)
+
+
 def cmd_cancel(_project):
     current = running_task()
     if not current:
@@ -223,6 +299,7 @@ def cmd_cancel(_project):
 
 COMMANDS = {
     "/task": cmd_task,
+    "/tail": cmd_tail,
     "/cancel": cmd_cancel,
     "/status": cmd_status,
     "/p0": cmd_p0,
@@ -282,7 +359,7 @@ def main():
         {"command": c.lstrip("/"), "description": d}
         for c, d in [("/status", "评审状态"), ("/p0", "open 的 P0"), ("/review_on", "打开定时评审"),
                      ("/review_off", "关闭定时评审"), ("/review_now", "立即强制评审"), ("/claude", "Claude 远程任务"),
-                     ("/codex", "Codex 远程任务"), ("/task", "运行中的任务"), ("/cancel", "终止任务"),
+                     ("/codex", "Codex 远程任务"), ("/task", "运行中的任务"), ("/tail", "任务进度与改动"), ("/cancel", "终止任务"),
                      ("/help", "帮助")]
     ]))
     log("bot 已启动")
