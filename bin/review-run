@@ -1,0 +1,143 @@
+#!/bin/bash
+# 定时评审：仅当编码方在 STATUS.md 中标记有新提交待评审时，才唤醒 Claude。
+# 用法：review-run <repo> [--force] [--dry-run]
+set -u
+
+TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+usage() { echo "用法: $(basename "$0") <repo> [--force] [--dry-run]" >&2; exit 2; }
+
+[ $# -ge 1 ] || usage
+REPO="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || { echo "不是 git 仓库: $1" >&2; exit 2; }
+shift
+FORCE=0
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) usage ;;
+  esac
+done
+
+# 仓库级配置，可覆盖以下默认值。
+REVIEW_DIR="docs/reviews"
+TEST_CMD=""
+CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
+if [ -f "$REPO/.review/config" ]; then
+  . "$REPO/.review/config"
+fi
+
+NAME="$(basename "$REPO")"
+LOG_DIR="$HOME/Library/Logs/review-loop/$NAME"
+LOCK_DIR="$LOG_DIR/review.lock"
+mkdir -p "$LOG_DIR"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_DIR/review.log"; }
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log "上一轮评审仍在运行，跳过"
+  exit 0
+fi
+WORKTREE=""
+cleanup() {
+  if [ -n "$WORKTREE" ]; then
+    git -C "$REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1
+  fi
+  rmdir "$LOCK_DIR" 2>/dev/null
+}
+trap cleanup EXIT
+
+field() { sed -n "s/^$1:[[:space:]]*//p" "$2" 2>/dev/null | head -1 | tr -d '[:space:]'; }
+
+STATUS_FILE="$REPO/$REVIEW_DIR/STATUS.md"
+TRACKER_FILE="$REPO/$REVIEW_DIR/TRACKER.md"
+if [ ! -f "$STATUS_FILE" ] || [ ! -f "$TRACKER_FILE" ]; then
+  log "缺少 $REVIEW_DIR/STATUS.md 或 TRACKER.md，先运行 review-init"
+  exit 1
+fi
+ready="$(field ready_for_review "$STATUS_FILE")"
+head_commit="$(field head_commit "$STATUS_FILE")"
+last_reviewed="$(field last_reviewed_commit "$TRACKER_FILE")"
+
+if [ "$FORCE" -eq 0 ]; then
+  if [ "$ready" != "true" ]; then
+    log "ready_for_review=${ready}，跳过"
+    exit 0
+  fi
+  if [ -z "$head_commit" ] || [ "$head_commit" = "none" ]; then
+    log "STATUS.md 未填写 head_commit，跳过"
+    exit 0
+  fi
+fi
+if [ -z "$head_commit" ] || [ "$head_commit" = "none" ]; then
+  head_commit="$(git -C "$REPO" rev-parse --short HEAD)"
+fi
+if ! head_full="$(git -C "$REPO" rev-parse --verify --quiet "$head_commit^{commit}")"; then
+  log "head_commit=$head_commit 不存在于本地仓库，跳过"
+  exit 0
+fi
+if [ -n "$last_reviewed" ] && [ "$last_reviewed" != "none" ]; then
+  last_full="$(git -C "$REPO" rev-parse --verify --quiet "$last_reviewed^{commit}")"
+  if [ "$FORCE" -eq 0 ] && [ "$last_full" = "$head_full" ]; then
+    log "$head_commit 已评审过，跳过"
+    exit 0
+  fi
+  range="$last_reviewed..$head_commit"
+else
+  range="(首次评审：全部历史，直到 $head_commit)"
+fi
+
+# 在 head_commit 的干净检出中运行测试，避免编码方未提交的改动影响结果。
+if [ -n "$TEST_CMD" ]; then
+  WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/review-loop.XXXXXX")"
+  rmdir "$WORKTREE"
+  git -C "$REPO" worktree add --detach --quiet "$WORKTREE" "$head_full"
+  test_output="$(cd "$WORKTREE" && bash -c "$TEST_CMD" 2>&1 | tail -40)"
+else
+  test_output="（.review/config 未配置 TEST_CMD，未运行测试）"
+fi
+
+focus=""
+if [ -f "$REPO/.review/focus.md" ]; then
+  focus="
+## 本项目的评审重点
+
+$(cat "$REPO/.review/focus.md")"
+fi
+
+prompt="$(sed "s|{{REVIEW_DIR}}|$REVIEW_DIR|g" "$TOOL_DIR/prompts/review_prompt.md")
+$focus
+
+## 本轮输入（由调度脚本生成）
+
+- head_commit: $head_commit
+- 评审范围: $range
+- 工作区状态（git status --short）:
+\`\`\`
+$(git -C "$REPO" status --short)
+\`\`\`
+- 在 $head_commit 干净检出中运行 \`$TEST_CMD\` 的输出末尾:
+\`\`\`
+$test_output
+\`\`\`
+"
+
+ALLOWED_TOOLS=(
+  "Read" "Grep" "Glob"
+  "Edit($REVIEW_DIR/**)" "Write($REVIEW_DIR/**)"
+  "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)"
+  "Bash(git status:*)" "Bash(git rev-parse:*)" "Bash(git ls-files:*)"
+)
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf '%s\n' "$prompt"
+  exit 0
+fi
+
+log "开始评审 $range"
+run_log="$LOG_DIR/review-$(date '+%Y%m%d-%H%M%S').log"
+cd "$REPO" && "$CLAUDE_BIN" -p "$prompt" \
+  --allowedTools "${ALLOWED_TOOLS[@]}" \
+  > "$run_log" 2>&1
+status=$?
+log "评审结束 exit=${status}，输出见 $run_log"
+exit "$status"

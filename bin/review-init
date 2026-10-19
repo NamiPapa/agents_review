@@ -1,0 +1,38 @@
+#!/bin/bash
+# 为仓库初始化评审协议文件；已存在的文件不会被覆盖。
+# 用法：review-init <repo>
+set -eu
+
+TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TEMPLATES="$TOOL_DIR/templates"
+[ $# -eq 1 ] || { echo "用法: $(basename "$0") <repo>" >&2; exit 2; }
+REPO="$(git -C "$1" rev-parse --show-toplevel)"
+
+copy_if_missing() {
+  if [ -e "$2" ]; then
+    echo "已存在，跳过: ${2#$REPO/}"
+  else
+    mkdir -p "$(dirname "$2")"
+    cp "$1" "$2"
+    echo "已创建: ${2#$REPO/}"
+  fi
+}
+
+copy_if_missing "$TEMPLATES/config" "$REPO/.review/config"
+copy_if_missing "$TEMPLATES/focus.md" "$REPO/.review/focus.md"
+
+REVIEW_DIR="docs/reviews"
+. "$REPO/.review/config"
+copy_if_missing "$TEMPLATES/STATUS.md" "$REPO/$REVIEW_DIR/STATUS.md"
+copy_if_missing "$TEMPLATES/TRACKER.md" "$REPO/$REVIEW_DIR/TRACKER.md"
+
+AGENTS="$REPO/AGENTS.md"
+if [ -f "$AGENTS" ] && grep -q "Review 协作协议" "$AGENTS"; then
+  echo "AGENTS.md 已包含 Review 协作协议，跳过"
+else
+  { [ -f "$AGENTS" ] && echo; sed "s|{{REVIEW_DIR}}|$REVIEW_DIR|g" "$TEMPLATES/AGENTS-protocol.md"; } >> "$AGENTS"
+  echo "已追加 Review 协作协议到 AGENTS.md"
+fi
+
+echo
+echo "下一步：编辑 .review/config 中的 TEST_CMD 和 .review/focus.md，提交后运行 review-install $REPO"
