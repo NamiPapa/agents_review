@@ -101,9 +101,9 @@ def main():
         last_message = STATE_DIR / f"{stamp}-{agent}.last.md"
         if agent == "claude":
             wt = str(worktree)
-            # 只开放 worktree 内读写和测试命令；-p 模式下未列出的工具一律拒绝。
+            # 只开放 worktree 内读写和测试命令；-p 模式下未列出的工具一律拒绝。Edit 规则覆盖 Write。
             args = [CLAUDE_BIN, "-p", prompt, "--allowedTools",
-                    "Read", "Grep", "Glob", f"Edit(/{wt}/**)", f"Write(/{wt}/**)",
+                    "Read", "Grep", "Glob", f"Edit(/{wt}/**)",
                     f"Bash({test_cmd}:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"]
         else:
             # workspace-write 沙箱：只能写 worktree，默认无网络。
@@ -139,7 +139,8 @@ def main():
     if not committed:
         git(repo, "branch", "-D", branch, check=False)
     status = "⏱ 超时被终止" if timed_out else ("✅ 完成" if code == 0 else f"❌ 退出码 {code}")
-    summary = tail(last_message, 25)
+    # Codex 出错（如额度用尽）时不会写最终回复，退回到日志末尾。
+    summary = tail(last_message, 25) or tail(agent_log, 6)
     lines = [
         f"{status} /{agent} [{project}]",
         f"任务: {task[:200]}",
