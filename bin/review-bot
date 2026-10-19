@@ -32,6 +32,7 @@ HELP = """可用命令（项目名可省略，默认 quant）：
 /review_now [项目] 立即强制评审一轮，完成后推送结果
 /claude [项目] 任务描述  让 Claude 在独立 worktree 执行任务，结果提交到新分支 tg/claude-*
 /codex [项目] 任务描述  同上，用 Codex，分支 tg/codex-*
+/codex_continue [项目] 任务描述  接着上一个 Codex 会话继续，新分支基于上一个 tg/codex-* 分支
 /task 查看正在运行的远程任务
 /tail 远程任务进度：agent 的阶段说明、最近命令和改动文件（无运行中任务时显示最近一次）
 /cancel 终止正在运行的远程任务
@@ -181,7 +182,24 @@ def running_task():
     return state
 
 
-def cmd_agent_task(agent, project, task):
+def last_codex_session(project):
+    """最近一次 Codex 任务的会话 id，以及最近一个仍存在的 tg/codex-* 分支。"""
+    pdir, _, _ = project_paths(project)
+    repo = dict(re.findall(r'^([A-Z_]+)="?(.*?)"?$', (pdir / "project.conf").read_text(), re.M))["REPO_PATH"]
+    session, base = None, None
+    for log_path in sorted(TASK_DIR.glob("*-codex.log"), reverse=True):
+        match = re.search(r"^session id: (\S+)", log_path.read_text(errors="replace"), re.M)
+        if match and not session:
+            session = match.group(1)
+        branch = "tg/codex-" + log_path.stem.rsplit("-", 1)[0]
+        if not base and run("git", "-C", repo, "rev-parse", "--verify", "--quiet", branch)[0] == 0:
+            base = branch
+        if session and base:
+            break
+    return session, base
+
+
+def cmd_agent_task(agent, project, task, extra=()):
     project_paths(project)
     if not task:
         return f"用法: /{agent} [项目] 任务描述"
@@ -192,12 +210,24 @@ def cmd_agent_task(agent, project, task):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     task_file = TASK_DIR / f"{stamp}-{agent}.task.txt"
     task_file.write_text(task)
-    proc = subprocess.Popen(["/usr/bin/python3", str(HUB / "bin/review-task"), agent, project, str(task_file)],
+    proc = subprocess.Popen(["/usr/bin/python3", str(HUB / "bin/review-task"), agent, project, str(task_file), *extra],
                             start_new_session=True, stdout=subprocess.DEVNULL,
                             stderr=open(TASK_DIR / f"{stamp}-{agent}.err.log", "w"))
     TASK_LOCK.write_text(json.dumps({"pid": proc.pid, "agent": agent, "project": project, "task": task,
                                      "started": time.strftime("%m-%d %H:%M")}, ensure_ascii=False))
     return f"📥 已接收 /{agent} [{project}]，在独立 worktree 中执行，完成后推送分支、测试结果和改动摘要。"
+
+
+def cmd_codex_continue(project, task):
+    if not task:
+        return "用法: /codex_continue [项目] 任务描述"
+    session, base = last_codex_session(project)
+    if not session:
+        return "找不到上一个 Codex 会话，请先用 /codex 开始"
+    reply = cmd_agent_task("codex", project, task, ["--resume", session, "--base", base or "HEAD"])
+    if reply.startswith("📥"):
+        reply += f"\n接续会话 {session[:8]}…，基于 {base or '当前 HEAD（上一个任务没有留下分支）'}"
+    return reply
 
 
 def cmd_task(_project):
@@ -326,7 +356,7 @@ def handle(message):
     if command in ("/help", "/start"):
         send(HELP)
         return
-    if command in ("/claude", "/codex"):
+    if command in ("/claude", "/codex", "/codex_continue"):
         rest = text.split(None, 1)[1].strip() if len(parts) > 1 else ""
         first = rest.split(None, 1)
         # 第一个词是已有项目名且后面还有内容时，视为指定项目。
@@ -335,7 +365,10 @@ def handle(message):
         else:
             project = DEFAULT_PROJECT
         try:
-            send(cmd_agent_task(command[1:], project, rest))
+            if command == "/codex_continue":
+                send(cmd_codex_continue(project, rest))
+            else:
+                send(cmd_agent_task(command[1:], project, rest))
         except Exception as exc:
             log(f"指令失败 {text!r}: {exc!r}")
             send(f"❌ {exc}")
@@ -359,7 +392,7 @@ def main():
         {"command": c.lstrip("/"), "description": d}
         for c, d in [("/status", "评审状态"), ("/p0", "open 的 P0"), ("/review_on", "打开定时评审"),
                      ("/review_off", "关闭定时评审"), ("/review_now", "立即强制评审"), ("/claude", "Claude 远程任务"),
-                     ("/codex", "Codex 远程任务"), ("/task", "运行中的任务"), ("/tail", "任务进度与改动"), ("/cancel", "终止任务"),
+                     ("/codex", "Codex 远程任务"), ("/codex_continue", "接着上次 Codex 继续"), ("/task", "运行中的任务"), ("/tail", "任务进度与改动"), ("/cancel", "终止任务"),
                      ("/help", "帮助")]
     ]))
     log("bot 已启动")

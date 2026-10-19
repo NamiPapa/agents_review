@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 """在项目仓库的独立 worktree 中运行一次 Claude/Codex 自由任务，结果提交到新分支并通过 Telegram 回报。
 
-用法：review-task <claude|codex> <项目名> <任务文本文件>
+用法：review-task <claude|codex> <项目名> <任务文本文件> [--resume <codex 会话 id> --base <分支>]
+--resume 接着上一个 Codex 会话继续对话，--base 让新分支基于上一个任务的分支，代码和上下文都能接上。
 由 review-bot 在后台调用。全局同一时间只跑一个任务；不推送、不合并，分支留给用户在本机确认。
 """
 import json
@@ -33,6 +34,11 @@ PROMPT = """这是用户通过 Telegram 远程下达的任务，你在项目仓�
 - 不要修改 agent.md 等需要用户确认的设计基线；遇到需要用户决定的问题，停下来在最终回复中列出选项。
 - 改完后运行测试：{test_cmd}
 - 最终回复用中文，简短说明：做了什么、测试结果、未完成或需要用户决定的事项。用户会在手机上阅读。
+"""
+
+CONTINUE_PROMPT = """这是接着你上一次 Telegram 任务的继续。上一次的改动已由调度脚本提交到分支 {base}；
+你现在位于新的 worktree {worktree}（分支 {branch}，基于 {base}），之前的 worktree 路径已失效，请只在当前目录工作。
+
 """
 
 
@@ -80,6 +86,8 @@ def tail(path, lines):
 
 def main():
     agent, project, task_file = sys.argv[1:4]
+    extra = dict(zip(sys.argv[4::2], sys.argv[5::2]))
+    resume, base_ref = extra.get("--resume"), extra.get("--base", "HEAD")
     task = Path(task_file).read_text().strip()
     conf = load_conf(project)
     repo = Path(git(conf["REPO_PATH"], "rev-parse", "--show-toplevel"))
@@ -91,13 +99,15 @@ def main():
     branch = f"tg/{agent}-{stamp}"
     worktree = WORKTREE_ROOT / f"{project}-{agent}-{stamp}"
     agent_log = STATE_DIR / f"{stamp}-{agent}.log"
-    base = git(repo, "rev-parse", "--short", "HEAD")
-    base_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    base = git(repo, "rev-parse", "--short", base_ref)
+    base_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD") if base_ref == "HEAD" else base_ref
     dirty = bool(git(repo, "status", "--porcelain"))
 
-    git(repo, "worktree", "add", "--quiet", "-b", branch, str(worktree), "HEAD")
+    git(repo, "worktree", "add", "--quiet", "-b", branch, str(worktree), base)
     try:
         prompt = PROMPT.format(branch=branch, task=task, test_cmd=test_cmd or "（未配置）")
+        if resume:
+            prompt = CONTINUE_PROMPT.format(base=base_branch, worktree=worktree, branch=branch) + prompt
         last_message = STATE_DIR / f"{stamp}-{agent}.last.md"
         if agent == "claude":
             wt = str(worktree)
@@ -105,6 +115,10 @@ def main():
             args = [CLAUDE_BIN, "-p", prompt, "--allowedTools",
                     "Read", "Grep", "Glob", f"Edit(/{wt}/**)",
                     f"Bash({test_cmd}:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"]
+        elif resume:
+            # resume 不支持 -C/--sandbox：工作目录取进程 cwd（worktree），沙箱用配置覆盖。
+            args = [CODEX_BIN, "exec", "resume", "-c", 'sandbox_mode="workspace-write"',
+                    "-o", str(last_message), resume, prompt]
         else:
             # workspace-write 沙箱：只能写 worktree，默认无网络。
             args = [CODEX_BIN, "exec", "--sandbox", "workspace-write", "-C", str(worktree),

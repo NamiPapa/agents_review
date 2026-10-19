@@ -69,6 +69,7 @@
 | `/review_now [项目]` | 后台运行 `review-run <项目> --force`，结束后推送结果 |
 
 | `/claude [项目] 任务` / `/codex [项目] 任务` | 远程自由任务，见下 |
+| `/codex_continue [项目] 任务` | 用 `codex exec resume` 接着最近一次 Codex 会话继续，新分支基于最近一个仍存在的 `tg/codex-*` 分支，形成分支链；合并时合最后一个分支即可 |
 | `/task` / `/cancel` | 查看/终止正在运行的远程任务 |
 | `/tail` | 远程任务进度：agent 阶段说明、最近命令、改动文件；无运行中任务时显示最近一次 |
 
