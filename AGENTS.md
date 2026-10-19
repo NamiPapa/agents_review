@@ -19,7 +19,8 @@ prompts/review_prompt.md      # 通用评审提示
 templates/                    # 新项目模板
 projects/
   <项目名>/
-    PROJECT.md                # 项目元信息（评审方与用户维护）
+    PROJECT.md                # 项目元信息、必读文档、评审重点（用户 / 评审方维护）
+    project.conf              # 脚本读取的配置：REPO_PATH、TEST_CMD（用户 / 评审方维护）
     STATUS.md                 # 编码方：有新提交待评审
     TRACKER.md                # 评审方：问题总表、状态、上次评审到的提交
     reviews/review-NNN.md     # 评审方：第 NNN 轮评审意见
@@ -32,7 +33,7 @@ projects/
 
 - 项目仓库地址（GitHub URL）与本机路径
 - 主分支
-- 测试命令（在被评审提交的干净检出中运行）
+- 测试命令（与 `project.conf` 的 `TEST_CMD` 一致）
 - 必读的设计文档（如 `AGENTS.md`、`agent.md`）
 - 本项目的评审重点（领域风险、易错点）
 - 需要用户决策的长期原则（如有）
@@ -41,7 +42,7 @@ projects/
 
 | 文件 | 写入方 | 其他方 |
 | --- | --- | --- |
-| `PROJECT.md` | 用户 / 评审方 | 只读 |
+| `PROJECT.md` / `project.conf` | 用户 / 评审方 | 只读 |
 | `STATUS.md` | 编码方 | 只读 |
 | `TRACKER.md` | 评审方 | 只读 |
 | `reviews/review-NNN*.md` | 评审方 | 只读，不得修改或删除 |
@@ -61,7 +62,7 @@ projects/
 8. 写 `reviews/review-NNN.md`，问题编号为 `RNNN-P0-x` / `P1` / `P2`（严重度递减）和 `RNNN-D-x`（需用户决策，列出选项）。每个问题写明：问题、影响、验收标准。
 9. 更新 `TRACKER.md`：问题状态、修复提交、新问题、`last_reviewed_commit`、`next_review_number`、评审记录。
 10. 某个 P0 连续两轮仍为 `open` 时，在评审开头加「⚠️ 需人工介入」。
-11. 提交并推送，提交信息形如 `quant: review-002`。
+11. 提交并推送，提交信息形如 `quant: review-002`。定时任务中由 `bin/review-run` 负责同步、提交和推送，且只提交 `reviews/` 与 `TRACKER.md`。
 
 ## 编码方工作流程
 
@@ -89,20 +90,16 @@ projects/
 
 ## 接入新项目
 
-1. 在 `projects/<项目名>/` 下从 `templates/` 创建 `PROJECT.md`、`STATUS.md`、`TRACKER.md`，以及空的 `reviews/`、`responses/`。
-2. 在项目仓库的 `AGENTS.md`（或 `CLAUDE.md`）中加一段指引：
+```bash
+~/Documents/review-loop/bin/review-init <项目名> <项目仓库路径>
+```
 
-   ```markdown
-   ## 评审协作
-   本项目的评审意见与改善记录集中存放在 agents_review 仓库
-   （https://github.com/NamiPapa/agents_review，本机 ~/Documents/review-loop）的
-   `projects/<项目名>/` 下。开始任务前与完成任务后，按该仓库 AGENTS.md 中的「编码方工作流程」执行。
-   ```
+它会创建 `projects/<项目名>/`（`project.conf`、`PROJECT.md`、`STATUS.md`、`TRACKER.md`、`reviews/`、`responses/`），并在项目仓库的 `AGENTS.md` 末尾追加「评审协作（agents_review）」一节，告诉该项目的编码方如何使用本仓库。已存在的文件不会覆盖。之后：
 
-3. 安装定时评审任务（见 README）。
+1. 填写 `project.conf` 的 `TEST_CMD` 和 `PROJECT.md` 的必读文档、评审重点。
+2. 本仓库和项目仓库分别提交。
+3. 运行 `bin/review-install <项目名>` 安装定时评审（见 README）。
 
-## 当前状态与迁移
+## 迁移记录
 
-- 现有脚本（`bin/review-*`）仍按旧方式工作：评审文件写在项目仓库的 `docs/reviews/`，配置在项目仓库的 `.review/`。
-- 待迁移：脚本改为读写 `projects/<项目名>/`；Quant 已有的 `docs/reviews/` 历史（review-001、TRACKER、STATUS）迁到 `projects/quant/`；Quant 的 `AGENTS.md` 改为指向本仓库。
-- 迁移完成前，项目仓库里的 `docs/reviews/` 仍是有效来源。
+- 2026-10-18：Quant 的评审记录从其仓库 `docs/reviews/` 迁入 `projects/quant/`，内容原样保留；Quant 的 `AGENTS.md` 已改为指向本仓库。

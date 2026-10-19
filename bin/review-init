@@ -1,38 +1,42 @@
 #!/bin/bash
-# 为仓库初始化评审协议文件；已存在的文件不会被覆盖。
-# 用法：review-init <repo>
+# 在评审仓库中为项目创建 projects/<项目名>/，并在项目仓库 AGENTS.md 中追加评审协作指引。
+# 已存在的文件不会被覆盖。
+# 用法：review-init <项目名> <项目仓库路径>
 set -eu
 
-TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TEMPLATES="$TOOL_DIR/templates"
-[ $# -eq 1 ] || { echo "用法: $(basename "$0") <repo>" >&2; exit 2; }
-REPO="$(git -C "$1" rev-parse --show-toplevel)"
+HUB="$(cd "$(dirname "$0")/.." && pwd)"
+TEMPLATES="$HUB/templates"
+[ $# -eq 2 ] || { echo "用法: $(basename "$0") <项目名> <项目仓库路径>" >&2; exit 2; }
+PROJECT="$1"
+REPO="$(git -C "$2" rev-parse --show-toplevel)"
+REPO_URL="$(git -C "$REPO" remote get-url origin 2>/dev/null || true)"
+PDIR="$HUB/projects/$PROJECT"
 
-copy_if_missing() {
-  if [ -e "$2" ]; then
-    echo "已存在，跳过: ${2#$REPO/}"
+render() {
+  sed -e "s|{{PROJECT}}|$PROJECT|g" -e "s|{{REPO_PATH}}|$REPO|g" -e "s|{{REPO_URL}}|$REPO_URL|g" "$1"
+}
+create_if_missing() {
+  if [ -e "$PDIR/$1" ]; then
+    echo "已存在，跳过: projects/$PROJECT/$1"
   else
-    mkdir -p "$(dirname "$2")"
-    cp "$1" "$2"
-    echo "已创建: ${2#$REPO/}"
+    render "$TEMPLATES/$1" > "$PDIR/$1"
+    echo "已创建: projects/$PROJECT/$1"
   fi
 }
 
-copy_if_missing "$TEMPLATES/config" "$REPO/.review/config"
-copy_if_missing "$TEMPLATES/focus.md" "$REPO/.review/focus.md"
-
-REVIEW_DIR="docs/reviews"
-. "$REPO/.review/config"
-copy_if_missing "$TEMPLATES/STATUS.md" "$REPO/$REVIEW_DIR/STATUS.md"
-copy_if_missing "$TEMPLATES/TRACKER.md" "$REPO/$REVIEW_DIR/TRACKER.md"
+mkdir -p "$PDIR/reviews" "$PDIR/responses"
+touch "$PDIR/reviews/.gitkeep" "$PDIR/responses/.gitkeep"
+for f in project.conf PROJECT.md STATUS.md TRACKER.md; do
+  create_if_missing "$f"
+done
 
 AGENTS="$REPO/AGENTS.md"
-if [ -f "$AGENTS" ] && grep -q "Review 协作协议" "$AGENTS"; then
-  echo "AGENTS.md 已包含 Review 协作协议，跳过"
+if [ -f "$AGENTS" ] && grep -q "agents_review" "$AGENTS"; then
+  echo "项目 AGENTS.md 已包含评审协作指引，跳过"
 else
-  { [ -f "$AGENTS" ] && echo; sed "s|{{REVIEW_DIR}}|$REVIEW_DIR|g" "$TEMPLATES/AGENTS-protocol.md"; } >> "$AGENTS"
-  echo "已追加 Review 协作协议到 AGENTS.md"
+  { [ -f "$AGENTS" ] && echo; render "$TEMPLATES/project-agents-section.md"; } >> "$AGENTS"
+  echo "已追加评审协作指引到 $AGENTS"
 fi
 
 echo
-echo "下一步：编辑 .review/config 中的 TEST_CMD 和 .review/focus.md，提交后运行 review-install $REPO"
+echo "下一步：填写 projects/$PROJECT/project.conf（TEST_CMD）和 PROJECT.md，两边分别提交后运行 review-install $PROJECT"

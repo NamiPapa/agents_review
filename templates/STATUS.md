@@ -1,6 +1,6 @@
 # Review Status（由编码方维护）
 
-编码方每次完成任务并提交后更新本文件。Claude 的定时评审只在 `ready_for_review: true` 且 `head_commit` 不同于 TRACKER 中 `last_reviewed_commit` 时开始评审。
+编码方每次在项目仓库完成任务并提交后更新本文件。定时评审只在 `ready_for_review: true` 且 `head_commit` 不同于 TRACKER 中 `last_reviewed_commit` 时开始。`head_commit` 填项目仓库的提交号。
 
 ready_for_review: false
 head_commit: none
@@ -13,4 +13,4 @@ tests:
 
 ## 已回应的评审
 
-（编码方填写：例如 review-001.response.md）
+（编码方填写：例如 responses/review-001.response.md）

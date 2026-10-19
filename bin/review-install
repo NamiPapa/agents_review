@@ -1,11 +1,11 @@
 #!/bin/bash
-# 为仓库安装/卸载 launchd 定时评审任务（每个仓库一个任务）。
-# 用法：review-install <repo> [--interval 秒数，默认 3600] [--uninstall]
+# 为项目安装/卸载 launchd 定时评审任务（每个项目一个任务）。
+# 用法：review-install <项目名> [--interval 秒数，默认 3600] [--uninstall]
 set -eu
 
-TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-[ $# -ge 1 ] || { echo "用法: $(basename "$0") <repo> [--interval N] [--uninstall]" >&2; exit 2; }
-REPO="$(git -C "$1" rev-parse --show-toplevel)"
+HUB="$(cd "$(dirname "$0")/.." && pwd)"
+[ $# -ge 1 ] || { echo "用法: $(basename "$0") <项目名> [--interval N] [--uninstall]" >&2; exit 2; }
+PROJECT="$1"
 shift
 INTERVAL=3600
 UNINSTALL=0
@@ -18,10 +18,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-NAME="$(basename "$REPO")"
-LABEL="com.review-loop.$(echo "$NAME" | tr -c 'A-Za-z0-9.-' '-' | sed 's/-*$//')"
+LABEL="com.review-loop.$(echo "$PROJECT" | tr -c 'A-Za-z0-9.-' '-' | sed 's/-*$//')"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG_DIR="$HOME/Library/Logs/review-loop/$NAME"
+LOG_DIR="$HOME/Library/Logs/review-loop/$PROJECT"
 DOMAIN="gui/$(id -u)"
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
@@ -31,6 +30,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   exit 0
 fi
 
+[ -f "$HUB/projects/$PROJECT/project.conf" ] || { echo "缺少 projects/$PROJECT/project.conf，先运行 review-init" >&2; exit 2; }
 mkdir -p "$LOG_DIR" "$(dirname "$PLIST")"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,8 +42,8 @@ cat > "$PLIST" <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>$TOOL_DIR/bin/review-run</string>
-    <string>$REPO</string>
+    <string>$HUB/bin/review-run</string>
+    <string>$PROJECT</string>
   </array>
   <key>StartInterval</key>
   <integer>$INTERVAL</integer>
@@ -61,4 +61,4 @@ cat > "$PLIST" <<EOF
 EOF
 plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap "$DOMAIN" "$PLIST"
-echo "已安装 $LABEL：每 ${INTERVAL} 秒检查 $REPO，日志在 $LOG_DIR"
+echo "已安装 ${LABEL}：每 ${INTERVAL} 秒检查项目 ${PROJECT}，日志在 $LOG_DIR"

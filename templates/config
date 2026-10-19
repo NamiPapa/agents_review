@@ -1,7 +1,0 @@
-# review-loop 仓库级配置（shell 语法，由 review-run / review-init 读取）
-
-# 评审文件目录（相对仓库根目录）。
-REVIEW_DIR="docs/reviews"
-
-# 在被评审提交的干净检出中运行的测试命令；留空则不运行。
-TEST_CMD=""
